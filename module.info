@@ -1,0 +1,5 @@
+desc=ZFS ACL Manager
+name=zfsaclmanager
+longdesc_en=ZFS ACL administration utility for webmin
+category=hardware
+os_support=freebsd solaris
