@@ -75,6 +75,9 @@ sub _js_escape
     $s =~ s/'/\\'/g;
     $s =~ s/\r/\\r/g;
     $s =~ s/\n/\\n/g;
+    $s =~ s/</\\x3c/g;
+    $s =~ s/>/\\x3e/g;
+    $s =~ s/&/\\x26/g;
     return $s;
 }
 

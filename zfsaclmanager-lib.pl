@@ -1395,6 +1395,8 @@ sub run_acl_manager
 
     my $mode = $opt{mode} || "";
     my $users = $opt{users} || "";
+    my @safe_users = _sanitize_user_list($users);
+    $users = join(' ', @safe_users);
     if (($mode eq "add" || $mode eq "remove" || $mode eq "user_rights") && $users eq "") {
         _log_line("ERROR: users required for $mode");
         return \@RUN_LOG;

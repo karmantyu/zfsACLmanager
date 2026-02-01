@@ -46,9 +46,11 @@ if ($in{'update_acl_users'}) {
             exit;
         }
         my $val = $in{'acl_users_set'} || '';
-        set_acl_users_for_dataset($info_local->{dataset}, $val);
+        my @safe_acl_users = _sanitize_user_list($val);
+        my $safe_val = join(' ', @safe_acl_users);
+        set_acl_users_for_dataset($info_local->{dataset}, $safe_val);
         state_set('target', $target);
-        state_set('acl_users', $val);
+        state_set('acl_users', $safe_val);
         state_save();
     }
     print "Content-type: text/plain\n\nOK\n";
@@ -163,7 +165,7 @@ if ($target ne '') {
         $acl_source = state_get('acl_users', '');
     }
     if ($acl_source) {
-        @acl_selected = split(/\s+/, $acl_source);
+        @acl_selected = _sanitize_user_list($acl_source);
     }
     my %acl_seen = map { $_ => 1 } @acl_selected;
     my $smb_users = list_samba_users();
@@ -564,7 +566,7 @@ if ($target ne '') {
     print &ui_form_start('apply.cgi', 'post');
     print &ui_hidden('target', $info->{target});
     my $effective_profile = $profile_sel;
-    my $users_val = $info->{acl_users} || ($use_state ? state_get('acl_users', '') : '');
+    my $users_val = join(' ', @acl_selected);
     print &ui_hidden('users', $users_val);
     print &ui_hidden('profile', $effective_profile);
     print &ui_hidden('base_owner', join("\n", @base_owner_sel));
