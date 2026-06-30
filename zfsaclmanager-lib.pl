@@ -26,6 +26,7 @@ our %ZFS_PROP_RECOMMENDED = (
     xattr      => { sa => 1 },
     atime      => { off => 1 },
 );
+our ($MODE_DIR, $MODE_FILE);
 
 sub state_get
 {
@@ -77,11 +78,107 @@ sub _sanitize_user_list
     my @users;
     foreach my $u (@raw) {
         next if ($u eq '');
-        next if ($u !~ /^[a-zA-Z0-9._-]+$/);
+        next if ($u !~ /^(?:[a-zA-Z0-9._-]+|JUID[0-9]+|JGID[0-9]+)$/);
         next if ($seen{$u}++);
         push @users, $u;
     }
     return @users;
+}
+
+sub normalize_acl_user_token
+{
+    my ($user) = @_;
+    return $1 if ($user =~ /^JUID([0-9]+)$/);
+    return undef if ($user =~ /^JGID([0-9]+)$/);
+    return $user;
+}
+
+sub parse_acl_users_prop
+{
+    my ($val) = @_;
+    my @raw = split(/[\0,\s]+/, ($val || ''));
+    my @users;
+    my $jail_uid = '';
+    my $jail_gid = '';
+    my $custom_mode_file = '';
+    my $custom_mode_dir = '';
+    foreach my $token (@raw) {
+        next if (!$token || $token eq '');
+        if ($token =~ /^JUID([0-9]+)$/) {
+            $jail_uid = $1;
+        }
+        elsif ($token =~ /^JGID([0-9]+)$/) {
+            $jail_gid = $1;
+        }
+        elsif ($token =~ /^CMODE_FILE:([0-7]{3})$/) {
+            $custom_mode_file = $1 if validate_posix_mode($1);
+        }
+        elsif ($token =~ /^CMODE_DIR:([0-7]{3})$/) {
+            $custom_mode_dir = $1 if validate_posix_mode($1);
+        }
+        elsif ($token =~ /^[a-zA-Z0-9._-]+$/) {
+            push @users, $token;
+        }
+    }
+    return (join("\n", @users), $jail_uid, $jail_gid, $custom_mode_file, $custom_mode_dir);
+}
+
+sub build_acl_users_prop_value
+{
+    my ($users_nl, $jail_uid, $jail_gid, $custom_mode_file, $custom_mode_dir) = @_;
+    my @users = _sanitize_user_list($users_nl);
+    if (defined($jail_uid) && $jail_uid ne '' && $jail_uid =~ /^[0-9]+$/) {
+        push @users, "JUID".$jail_uid;
+    }
+    if (defined($jail_gid) && $jail_gid ne '' && $jail_gid =~ /^[0-9]+$/) {
+        push @users, "JGID".$jail_gid;
+    }
+    if (defined($custom_mode_file) && $custom_mode_file ne '' && validate_posix_mode($custom_mode_file)) {
+        push @users, "CMODE_FILE:".$custom_mode_file;
+    }
+    if (defined($custom_mode_dir) && $custom_mode_dir ne '' && validate_posix_mode($custom_mode_dir)) {
+        push @users, "CMODE_DIR:".$custom_mode_dir;
+    }
+    return join(' ', @users);
+}
+
+sub validate_posix_mode
+{
+    my ($mode) = @_;
+    return 0 if (!defined $mode || $mode eq '');
+    return 1 if ($mode =~ /^[0-7]{3}$/);
+    return 0;
+}
+
+sub parse_custom_modes_prop
+{
+    my ($val) = @_;
+    my @raw = split(/[\0,\s]+/, ($val || ''));
+    my $custom_file = '';
+    my $custom_dir = '';
+    foreach my $token (@raw) {
+        next if (!$token || $token eq '');
+        if ($token =~ /^CMODE_FILE:([0-7]{3})$/) {
+            $custom_file = $1 if validate_posix_mode($1);
+        }
+        elsif ($token =~ /^CMODE_DIR:([0-7]{3})$/) {
+            $custom_dir = $1 if validate_posix_mode($1);
+        }
+    }
+    return ($custom_file, $custom_dir);
+}
+
+sub build_custom_modes_prop_value
+{
+    my ($custom_file, $custom_dir) = @_;
+    my @modes;
+    if (defined($custom_file) && $custom_file ne '' && validate_posix_mode($custom_file)) {
+        push @modes, "CMODE_FILE:".$custom_file;
+    }
+    if (defined($custom_dir) && $custom_dir ne '' && validate_posix_mode($custom_dir)) {
+        push @modes, "CMODE_DIR:".$custom_dir;
+    }
+    return join(' ', @modes);
 }
 
 sub get_mountpoints
@@ -151,7 +248,7 @@ sub detect_profile_from_dataset
     return 'MEDIA' if (!$ds);
     my $val = _run_cmd("zfs get -H -o value $ZFS_PROFILE_PROP "._quote_shell($ds));
     $val = uc($val || '');
-    return ($val eq 'EXEC') ? 'EXEC' : 'MEDIA';
+    return ($val eq 'EXEC' || $val eq 'MEDIA' || $val eq 'JAILMEDIA' || $val eq 'JAILEXEC') ? $val : 'MEDIA';
 }
 
 sub set_profile_for_dataset
@@ -159,7 +256,7 @@ sub set_profile_for_dataset
     my ($ds, $profile) = @_;
     return 0 if (!$ds);
     $profile = uc($profile || '');
-    return 0 if ($profile ne 'MEDIA' && $profile ne 'EXEC');
+    return 0 if ($profile ne 'MEDIA' && $profile ne 'EXEC' && $profile ne 'JAILMEDIA' && $profile ne 'JAILEXEC');
     my $prop = $ZFS_PROFILE_PROP."=".$profile;
     _run_cmd("zfs set "._quote_shell($prop)." "._quote_shell($ds));
     return 1;
@@ -346,10 +443,54 @@ sub list_system_groups
 
 sub profile_modes
 {
+    my ($profile, $custom_file, $custom_dir) = @_;
+    
+    # If custom modes are provided and valid, use them
+    if (defined($custom_file) && $custom_file ne '' && validate_posix_mode($custom_file)) {
+        if (defined($custom_dir) && $custom_dir ne '' && validate_posix_mode($custom_dir)) {
+            return ($custom_dir, $custom_file);
+        }
+        elsif (!defined($custom_dir) || $custom_dir eq '') {
+            # Only custom file mode provided, use default dir for profile
+            $profile = uc($profile || '');
+            my ($default_dir, $default_file) = _profile_modes_default($profile);
+            return ($default_dir, $custom_file);
+        }
+    }
+    if (defined($custom_dir) && $custom_dir ne '' && validate_posix_mode($custom_dir)) {
+        # Only custom dir mode provided, use default file for profile
+        $profile = uc($profile || '');
+        my ($default_dir, $default_file) = _profile_modes_default($profile);
+        return ($custom_dir, $default_file);
+    }
+    
+    # No custom modes or invalid, use profile defaults
+    $profile = uc($profile || '');
+    return _profile_modes_default($profile);
+}
+
+sub _profile_modes_default
+{
     my ($profile) = @_;
     $profile = uc($profile || '');
-    return ('755', '755') if ($profile eq 'EXEC');
-    return ('755', '644');
+    return ('2775', '775') if ($profile eq 'JAILEXEC');
+    return ('2775', '664') if ($profile eq 'JAILMEDIA');
+    return ('775', '755') if ($profile eq 'EXEC');
+    return ('775', '644');
+}
+
+sub set_jailmedia_profile
+{
+    set_media_profile();
+    $MODE_DIR = '2775';
+    $MODE_FILE = '664';
+}
+
+sub set_jailexec_profile
+{
+    set_exec_profile();
+    $MODE_DIR = '2775';
+    $MODE_FILE = '775';
 }
 
 sub zfs_props_for_dataset
@@ -434,9 +575,27 @@ sub detect_target_info
         $info{acl_users} = get_acl_users_for_dataset($info{dataset});
     }
 
-    my ($mode_dir, $mode_file) = profile_modes($info{profile});
+    # Extract custom modes from acl_users if present
+    my $custom_mode_file = '';
+    my $custom_mode_dir = '';
+    if ($info{acl_users}) {
+        my @raw = split(/[\0,\s]+/, $info{acl_users});
+        foreach my $token (@raw) {
+            next if (!$token || $token eq '');
+            if ($token =~ /^CMODE_FILE:([0-7]{3})$/) {
+                $custom_mode_file = $1 if validate_posix_mode($1);
+            }
+            elsif ($token =~ /^CMODE_DIR:([0-7]{3})$/) {
+                $custom_mode_dir = $1 if validate_posix_mode($1);
+            }
+        }
+    }
+
+    my ($mode_dir, $mode_file) = profile_modes($info{profile}, $custom_mode_file, $custom_mode_dir);
     $info{mode_dir} = $mode_dir;
     $info{mode_file} = $mode_file;
+    $info{custom_mode_file} = $custom_mode_file;
+    $info{custom_mode_dir} = $custom_mode_dir;
 
     my @st = stat($target);
     if (@st) {
@@ -457,7 +616,6 @@ our ($DIR_OWNER_PERMS, $DIR_GROUP_PERMS, $DIR_EVERY_PERMS);
 our ($FILE_OWNER_PERMS, $FILE_GROUP_PERMS, $FILE_EVERY_PERMS);
 our ($DIR_USER_PERMS, $FILE_USER_PERMS);
 our ($DIR_FLAGS, $FILE_FLAGS);
-our ($MODE_DIR, $MODE_FILE);
 our ($REC_ACLTYPE, $REC_ACLINHERIT, $REC_ACLMODE, $REC_XATTR, $REC_ATIME);
 our ($ENFORCE_USERS_NL, $REMOVE_USERS_NL);
 our ($modified_mask, $LAST_MOD_MASK);
@@ -612,7 +770,7 @@ sub set_media_profile
     $FILE_EVERY_PERMS = $MEDIA_FILE_EVERY_PERMS;
     $DIR_USER_PERMS = $MEDIA_DIR_USER_PERMS;
     $FILE_USER_PERMS = $MEDIA_FILE_USER_PERMS;
-    $MODE_DIR = "755";
+    $MODE_DIR = "775";
     $MODE_FILE = "644";
 }
 
@@ -629,7 +787,7 @@ sub set_exec_profile
     $FILE_EVERY_PERMS = $EXEC_FILE_EVERY_PERMS;
     $DIR_USER_PERMS = $EXEC_DIR_USER_PERMS;
     $FILE_USER_PERMS = $EXEC_FILE_USER_PERMS;
-    $MODE_DIR = "755";
+    $MODE_DIR = "775";
     $MODE_FILE = "755";
 }
 
@@ -640,6 +798,12 @@ sub apply_profile
     }
     elsif ($PROFILE eq "EXEC") {
         set_exec_profile();
+    }
+    elsif ($PROFILE eq "JAILMEDIA") {
+        set_jailmedia_profile();
+    }
+    elsif ($PROFILE eq "JAILEXEC") {
+        set_jailexec_profile();
     }
     else {
         set_media_profile();
@@ -751,9 +915,11 @@ sub count_dup_users
 sub user_exists_in_acl
 {
     my ($acl, $user) = @_;
+    my $norm = normalize_acl_user_token($user);
+    return 0 if (!defined $norm || $norm eq '');
     foreach my $line (split(/\n/, $acl || "")) {
         $line =~ s/^\s+|\s+$//g;
-        return 1 if ($line =~ /^user:\Q$user\E:/);
+        return 1 if ($line =~ /^user:\Q$norm\E:/);
     }
     return 0;
 }
@@ -826,11 +992,13 @@ sub build_user_ace_list
     my @u = grep { $_ ne "" } split(/\n/, $users_nl || "");
     my @aces;
     foreach my $u (@u) {
+        my $norm = normalize_acl_user_token($u);
+        next if (!defined $norm || $norm eq '');
         if ($isdir) {
-            push @aces, "user:$u:$DIR_USER_PERMS:$DIR_FLAGS:allow";
+            push @aces, "user:$norm:$DIR_USER_PERMS:$DIR_FLAGS:allow";
         }
         else {
-            push @aces, "user:$u:$FILE_USER_PERMS:$FILE_FLAGS:allow";
+            push @aces, "user:$norm:$FILE_USER_PERMS:$FILE_FLAGS:allow";
         }
     }
     return join(",", @aces);
@@ -911,18 +1079,20 @@ sub add_users_acl
     my $changed = 0;
     foreach my $u (split(/\s+/, $users || "")) {
         next if ($u eq "");
+        my $norm = normalize_acl_user_token($u);
+        next if (!defined $norm || $norm eq '');
         next if (user_exists_in_acl($acltxt, $u));
         my $ace;
         if ($isdir) {
-            $ace = "user:$u:$DIR_USER_PERMS:$DIR_FLAGS:allow";
+            $ace = "user:$norm:$DIR_USER_PERMS:$DIR_FLAGS:allow";
         }
         else {
-            $ace = "user:$u:$FILE_USER_PERMS:$FILE_FLAGS:allow";
+            $ace = "user:$norm:$FILE_USER_PERMS:$FILE_FLAGS:allow";
         }
         $add_list = $add_list ? "$add_list,$ace" : $ace;
         $STAT{stat_users_added}++;
         $changed = 1;
-        $acltxt .= "\nuser:$u:";
+        $acltxt .= "\nuser:$norm:";
     }
     if ($add_list ne "") {
         run_setfacl("-m", $add_list, $obj);
@@ -1088,8 +1258,10 @@ sub posix_reset
     my $want_uid = $POSIX_UID;
     my $want_gid = $POSIX_GID;
     if (!$MODE_DIR || !$MODE_FILE) {
-        if ($PROFILE eq "EXEC") { $MODE_DIR ||= "755"; $MODE_FILE ||= "755"; }
-        else { $MODE_DIR ||= "755"; $MODE_FILE ||= "644"; }
+        if ($PROFILE eq "JAILEXEC") { $MODE_DIR ||= "2775"; $MODE_FILE ||= "775"; }
+        elsif ($PROFILE eq "JAILMEDIA") { $MODE_DIR ||= "2775"; $MODE_FILE ||= "664"; }
+        elsif ($PROFILE eq "EXEC") { $MODE_DIR ||= "775"; $MODE_FILE ||= "755"; }
+        else { $MODE_DIR ||= "775"; $MODE_FILE ||= "644"; }
     }
     my $want_mode = $isdir ? $MODE_DIR : $MODE_FILE;
     my @st = stat($p);
@@ -1302,7 +1474,20 @@ sub load_policy_users
         my $val = get_acl_users_for_dataset($DATASET);
         if ($val) {
             my @u = split(/\s+/, $val);
-            $ENFORCE_USERS_NL = join("\n", @u);
+            my @users;
+            foreach my $u (@u) {
+                next if ($u eq '');
+                if ($u =~ /^JUID([0-9]+)$/) {
+                    push @users, $1;
+                }
+                elsif ($u =~ /^JGID([0-9]+)$/) {
+                    next;
+                }
+                else {
+                    push @users, $u;
+                }
+            }
+            $ENFORCE_USERS_NL = join("\n", @users);
             return $ENFORCE_USERS_NL;
         }
     }
@@ -1387,6 +1572,14 @@ sub run_acl_manager
             $POSIX_OWNER = $opt{base_owner};
             $POSIX_GROUP = $opt{base_group};
         }
+    }
+    elsif (($PROFILE eq 'JAILMEDIA' || $PROFILE eq 'JAILEXEC') &&
+           defined $opt{jail_uid} && $opt{jail_uid} ne '' && $opt{jail_uid} =~ /^[0-9]+$/ &&
+           defined $opt{jail_gid} && $opt{jail_gid} ne '' && $opt{jail_gid} =~ /^[0-9]+$/) {
+        $POSIX_UID = $opt{jail_uid};
+        $POSIX_GID = $opt{jail_gid};
+        $POSIX_OWNER = '';
+        $POSIX_GROUP = '';
     }
 
     $ENFORCE_USERS_NL = "";

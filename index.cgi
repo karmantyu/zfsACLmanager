@@ -5,14 +5,12 @@ require './zfsaclmanager-lib.pl';
 our (%in, %text);
 
 &ReadParse();
-
 my $target = $in{'target'} || '';
 my $update_error = '';
 my $info;
 
 if ($in{'update_state'}) {
     if ($target ne '') {
-        state_set('target', $target);
         my $zfs_opts = zfs_prop_options();
         foreach my $p (keys %$zfs_opts) {
             my $k = "zfs_".$p;
@@ -45,12 +43,15 @@ if ($in{'update_acl_users'}) {
             print "Content-type: text/plain\n\nERROR: dataset not found\n";
             exit;
         }
+        my $current_acl = get_acl_users_for_dataset($info_local->{dataset});
+        my ($current_users, $current_juid, $current_jgid, $current_custom_file, $current_custom_dir) = parse_acl_users_prop($current_acl);
         my $val = $in{'acl_users_set'} || '';
         my @safe_acl_users = _sanitize_user_list($val);
         my $safe_val = join(' ', @safe_acl_users);
-        set_acl_users_for_dataset($info_local->{dataset}, $safe_val);
+        my $prop_val = build_acl_users_prop_value($safe_val, $current_juid, $current_jgid, $current_custom_file, $current_custom_dir);
+        set_acl_users_for_dataset($info_local->{dataset}, $prop_val);
         state_set('target', $target);
-        state_set('acl_users', $safe_val);
+        state_set('acl_users', $prop_val);
         state_save();
     }
     print "Content-type: text/plain\n\nOK\n";
@@ -68,8 +69,14 @@ if ($target ne '') {
         }
         else {
             set_profile_for_dataset($info->{dataset}, $in{'profile_set'});
-            if (defined $in{'acl_users_set'}) {
-                set_acl_users_for_dataset($info->{dataset}, $in{'acl_users_set'});
+            if (defined $in{'acl_users_set'} || defined $in{'jail_uid'} || defined $in{'jail_gid'} || defined $in{'custom_mode_file'} || defined $in{'custom_mode_dir'}) {
+                my $acl_users_val = $in{'acl_users_set'} || '';
+                my $jail_uid = $in{'jail_uid'} || '';
+                my $jail_gid = $in{'jail_gid'} || '';
+                my $custom_mode_file = $in{'custom_mode_file'} || '';
+                my $custom_mode_dir = $in{'custom_mode_dir'} || '';
+                my $prop_val = build_acl_users_prop_value($acl_users_val, $jail_uid, $jail_gid, $custom_mode_file, $custom_mode_dir);
+                set_acl_users_for_dataset($info->{dataset}, $prop_val);
             }
             my $zfs_opts = zfs_prop_options();
             foreach my $p (keys %$zfs_opts) {
@@ -92,9 +99,11 @@ my $about_html = "<div style='float:right;max-width:45%;color:#555;font-size:90%
     "recommended ZFS ACL properties. Tested on FreeBSD.".
     "</div>";
 print $about_html;
-my $ver = our $MODULE_VERSION;
-$ver = '1.0 beta' if (!$ver);
-print "<div style='margin-top:2px;color:#666'>Version: ".&html_escape($ver)."</div>";
+my $ver = (defined $text{'module_version'} && $text{'module_version'} ne '') ?
+    $text{'module_version'} : (our $MODULE_VERSION || '');
+if ($ver ne '') {
+    print "<div style='margin-top:2px;color:#666'>Version: ".&html_escape($ver)."</div>";
+}
 print "<div style='clear:both'></div>";
 
 print &ui_form_start('index.cgi', 'get');
@@ -139,16 +148,21 @@ if ($target ne '') {
     my $use_state = ($state_target && $state_target eq $target && !$force_refresh) ? 1 : 0;
     my $has_ds = $info->{dataset} ? 1 : 0;
     my $saved_profile = $use_state ? state_get('profile', '') : '';
-    my $profile_sel;
+    my $profile_sel = '';
     if ($info->{dataset}) {
-        $profile_sel = ($info->{profile} && $info->{profile} eq 'EXEC') ? 'EXEC' : 'MEDIA';
+        $profile_sel = $info->{profile} || 'MEDIA';
     }
     else {
         $profile_sel = $saved_profile ? $saved_profile : 'MEDIA';
     }
+    if ($profile_sel !~ /^(?:MEDIA|EXEC|JAILMEDIA|JAILEXEC)$/) {
+        $profile_sel = 'MEDIA';
+    }
     my @profile_set_opts = (
-        [ 'MEDIA', $text{'profile_media'} ],
-        [ 'EXEC',  $text{'profile_exec'} ],
+        [ 'MEDIA',     $text{'profile_media'} ],
+        [ 'EXEC',      $text{'profile_exec'} ],
+        [ 'JAILMEDIA', $text{'profile_jailmedia'} ],
+        [ 'JAILEXEC',  $text{'profile_jailexec'} ],
     );
     my $profile_select = &ui_select(
         'profile_set', $profile_sel, \@profile_set_opts, 1, 0, 0,
@@ -156,15 +170,20 @@ if ($target ne '') {
         "onchange='zfsacl_update_modes()'"
     );
 
-    my $mode_str = "dir=".$info->{mode_dir}." file=".$info->{mode_file};
+    my $mode_str = "file=".$info->{mode_file}." dir=".$info->{mode_dir};
     my $posix_modes_html = "<span id='posix_modes_val'>".&html_escape($mode_str)."</span>";
 
     my @acl_selected = ();
     my $acl_source = $info->{acl_users};
+    my $jail_uid = '';
+    my $jail_gid = '';
+    my $custom_mode_file = '';
+    my $custom_mode_dir = '';
     if (!$acl_source && $use_state) {
         $acl_source = state_get('acl_users', '');
     }
     if ($acl_source) {
+        ($acl_source, $jail_uid, $jail_gid, $custom_mode_file, $custom_mode_dir) = parse_acl_users_prop($acl_source);
         @acl_selected = _sanitize_user_list($acl_source);
     }
     my %acl_seen = map { $_ => 1 } @acl_selected;
@@ -232,6 +251,21 @@ if ($target ne '') {
         $info->{mountpoint} ? &html_escape($info->{mountpoint}) : 'N/A');
     print &ui_table_row($text{'profile'}, $profile_select);
     print &ui_table_row($text{'posix_modes'}, $posix_modes_html);
+    my $jail_row_style = '';
+    my $jail_uid_input = &ui_textbox('jail_uid', $jail_uid, 8, 0, 10,
+        "onchange='profile_update_props(this.form, document.getElementById(\'profile_set\').value)' ");
+    my $jail_gid_input = &ui_textbox('jail_gid', $jail_gid, 8, 0, 10,
+        "onchange='profile_update_props(this.form, document.getElementById(\'profile_set\').value)' ");
+    print "<tr id='jail_uid_row' style='$jail_row_style'><td>".&html_escape($text{'jail_uid'})."</td><td>$jail_uid_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_jail_uid'})."</span></td></tr>";
+    print "<tr id='jail_gid_row' style='$jail_row_style'><td>".&html_escape($text{'jail_gid'})."</td><td>$jail_gid_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_jail_gid'})."</span></td></tr>";
+    
+    # Custom POSIX modes fields
+    my $custom_mode_file_input = &ui_textbox('custom_mode_file', $custom_mode_file, 6, 0, 3,
+        "onchange='zfsacl_update_modes()' placeholder='644' ");
+    my $custom_mode_dir_input = &ui_textbox('custom_mode_dir', $custom_mode_dir, 6, 0, 3,
+        "onchange='zfsacl_update_modes()' placeholder='755' ");
+    print "<tr id='custom_mode_file_row'><td>".&html_escape($text{'custom_mode_file'})."</td><td>$custom_mode_file_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_custom_modes'})."</span></td></tr>";
+    print "<tr id='custom_mode_dir_row'><td>".&html_escape($text{'custom_mode_dir'})."</td><td>$custom_mode_dir_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_custom_modes'})."</span></td></tr>";
     my $disp_uid = $info->{posix_uid};
     my $disp_gid = $info->{posix_gid};
     if ($base_owner_sel[0]) {
@@ -282,22 +316,34 @@ if ($target ne '') {
     print &ui_table_span("<b>$text{'base_group'}</b><br>".$group_select);
     print &ui_table_end();
 
-    print "<script>\n".
-          "function zfsacl_update_modes(){\n".
-          "  var sel = document.getElementById('profile_set');\n".
-          "  if(!sel) return;\n".
-          "  var v = sel.value;\n".
-          "  var txt = (v === 'EXEC') ? 'dir=755 file=755' : 'dir=755 file=644';\n".
-          "  var span = document.getElementById('posix_modes_val');\n".
-          "  if(span) span.textContent = txt;\n".
-          "  var p = document.getElementsByName('profile');\n".
-          "  if(p && p.length){ for(var i=0;i<p.length;i++){ p[i].value = v; } }\n".
-          "  var f = sel.form;\n".
-          "  if (f) {\n".
-          "    if (typeof zfsacl_update_submit === 'function') { zfsacl_update_submit(f); }\n".
-          "    profile_update_props(f, v);\n".
-          "  }\n".
-          "}\n".
+        print "<script>\n".
+            "function zfsacl_update_modes(){\n".
+            "  var sel = document.getElementById('profile_set');\n".
+            "  if(!sel) return;\n".
+            "  var v = sel.value;\n".
+            "  var txt = 'file=644 dir=775';\n".
+            "  if (v === 'EXEC') { txt = 'file=755 dir=775'; }\n".
+            "  else if (v === 'JAILMEDIA') { txt = 'file=664 dir=2775'; }\n".
+            "  else if (v === 'JAILEXEC') { txt = 'file=775 dir=2775'; }\n".
+            "  var cmf = document.getElementById('custom_mode_file');\n".
+            "  var cmd = document.getElementById('custom_mode_dir');\n".
+            "  if (cmf && cmf.value !== '') { txt = 'file='+cmf.value+' dir='+(cmd && cmd.value ? cmd.value : txt.split(' dir=')[1]); }\n".
+            "  else if (cmd && cmd.value !== '') { txt = 'file='+txt.split(' file=')[1].split(' ')[0]+' dir='+cmd.value; }\n".
+            "  var span = document.getElementById('posix_modes_val');\n".
+            "  if(span) span.textContent = txt;\n".
+            "  var visible = true;\n".
+            "  var juid = document.getElementById('jail_uid_row');\n".
+            "  var jgid = document.getElementById('jail_gid_row');\n".
+            "  if (juid) { juid.style.display = visible ? '' : 'none'; }\n".
+            "  if (jgid) { jgid.style.display = visible ? '' : 'none'; }\n".
+            "  var p = document.getElementsByName('profile');\n".
+            "  if(p && p.length){ for(var i=0;i<p.length;i++){ p[i].value = v; } }\n".
+            "  var f = sel.form;\n".
+            "  if (f) {\n".
+            "    if (typeof zfsacl_update_submit === 'function') { zfsacl_update_submit(f); }\n".
+            "    profile_update_props(f, v);\n".
+            "  }\n".
+            "}\n".
           "function profile_update_props(f, v){\n".
           "  if(!f) return;\n".
           "  var params = [];\n".
@@ -307,6 +353,14 @@ if ($target ne '') {
           "  params.push('profile_set='+encodeURIComponent(v || ''));\n".
           "  var acl = f.elements['acl_users_set'];\n".
           "  if(acl && acl.value !== undefined){ params.push('acl_users_set='+encodeURIComponent(acl.value)); }\n".
+          "  var juid = f.elements['jail_uid'];\n".
+          "  if (juid && juid.value !== undefined){ params.push('jail_uid='+encodeURIComponent(juid.value)); }\n".
+          "  var jgid = f.elements['jail_gid'];\n".
+          "  if (jgid && jgid.value !== undefined){ params.push('jail_gid='+encodeURIComponent(jgid.value)); }\n".
+          "  var cmf = f.elements['custom_mode_file'];\n".
+          "  if (cmf && cmf.value !== undefined){ params.push('custom_mode_file='+encodeURIComponent(cmf.value)); }\n".
+          "  var cmd = f.elements['custom_mode_dir'];\n".
+          "  if (cmd && cmd.value !== undefined){ params.push('custom_mode_dir='+encodeURIComponent(cmd.value)); }\n".
           "  for(var i=0;i<f.elements.length;i++){\n".
           "    var e = f.elements[i];\n".
           "    if(!e || !e.name) continue;\n".
@@ -571,9 +625,11 @@ if ($target ne '') {
     print &ui_hidden('profile', $effective_profile);
     print &ui_hidden('base_owner', join("\n", @base_owner_sel));
     print &ui_hidden('base_group', join("\n", @base_group_sel));
+    print &ui_hidden('jail_uid', $jail_uid);
+    print &ui_hidden('jail_gid', $jail_gid);
     print &ui_table_start($text{'menu'}, undef, 2);
     print &ui_table_row($text{'mode'},
-        &ui_select('mode', $in{'mode'} || 'audit_acl', \@mode_opts, 1, 0, 0, 0,
+        &ui_select('mode', $in{'mode'} || 'audit_posix', \@mode_opts, 1, 0, 0, 0,
             "onchange='toggle_rights_fields(this.form)'"));
     my $rec_default = defined $in{'recursive'} ? $in{'recursive'} : 1;
     print &ui_table_row($text{'recursive'},
