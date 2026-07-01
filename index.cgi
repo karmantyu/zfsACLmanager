@@ -188,9 +188,9 @@ if ($target ne '') {
     }
     my %acl_seen = map { $_ => 1 } @acl_selected;
     my $smb_users = list_samba_users();
-    my @acl_left_opts = map { [ $_, $_ ] } @acl_selected;
+    my @acl_left_opts = map { [ $_, format_user_label($_, user_uid_for_name($_)) ] } @acl_selected;
     my @acl_right_list = grep { !$acl_seen{$_} } @$smb_users;
-    my @acl_right_opts = map { [ $_, $_ ] } @acl_right_list;
+    my @acl_right_opts = map { [ $_, format_user_label($_, user_uid_for_name($_)) ] } @acl_right_list;
     my $acl_left = &ui_select(
         'acl_users_left', [], \@acl_left_opts, 8, 1, 0, $has_ds ? 0 : 1,
         "style='min-width:200px' ondblclick='acl_users_move(this.form,0);'"
@@ -203,6 +203,22 @@ if ($target ne '') {
         "<td><b>$text{'acl_users_policy'}</b></td><td></td><td><b>$text{'samba_users'}</b></td></tr>".
         "<tr class='ui_multi_select_row'><td>$acl_left</td><td></td><td>$acl_right</td></tr></table>".
         &ui_hidden('acl_users_set', join("\n", @acl_selected));
+    my $jail_info_html = '';
+    if ($jail_uid ne '' || $jail_gid ne '') {
+        my @jail_info = ();
+        if ($jail_uid ne '') {
+            my $jail_name = getpwuid($jail_uid);
+            $jail_name = '-' if (!defined $jail_name || $jail_name eq '');
+            push @jail_info, 'Jail UID: '.format_user_label($jail_name, $jail_uid);
+        }
+        if ($jail_gid ne '') {
+            my $jail_name = getgrgid($jail_gid);
+            $jail_name = '-' if (!defined $jail_name || $jail_name eq '');
+            push @jail_info, 'Jail GID: '.format_group_label($jail_name, $jail_gid);
+        }
+        $jail_info_html = "<div style='margin-top:6px;color:#666;font-size:90%'><b>Extra</b><br>".
+            &html_escape(join(' / ', @jail_info))."</div>";
+    }
 
     my $saved_owner = $use_state ? state_get('base_owner', '') : '';
     my $saved_group = $use_state ? state_get('base_group', '') : '';
@@ -212,12 +228,12 @@ if ($target ne '') {
     my $sys_groups = list_system_groups();
     my %owner_seen = map { $_ => 1 } @base_owner_sel;
     my %group_seen = map { $_ => 1 } @base_group_sel;
-    my @owner_left_opts = map { [ $_, $_ ] } @base_owner_sel;
-    my @group_left_opts = map { [ $_, $_ ] } @base_group_sel;
+    my @owner_left_opts = map { [ $_, format_user_label($_, user_uid_for_name($_)) ] } @base_owner_sel;
+    my @group_left_opts = map { [ $_, format_group_label($_, group_gid_for_name($_)) ] } @base_group_sel;
     my @owner_right_list = grep { !$owner_seen{$_} } @$sys_users;
     my @group_right_list = grep { !$group_seen{$_} } @$sys_groups;
-    my @owner_right_opts = map { [ $_, $_ ] } @owner_right_list;
-    my @group_right_opts = map { [ $_, $_ ] } @group_right_list;
+    my @owner_right_opts = map { [ $_, format_user_label($_, user_uid_for_name($_)) ] } @owner_right_list;
+    my @group_right_opts = map { [ $_, format_group_label($_, group_gid_for_name($_)) ] } @group_right_list;
     my $owner_left = &ui_select(
         'base_owner_left', [], \@owner_left_opts, 3, 1, 0, 0,
         "style='min-width:200px;height:6em' ondblclick='base_owner_move(this.form,0);'"
@@ -311,7 +327,7 @@ if ($target ne '') {
         print &ui_table_row($text{'acl_base_lines'} || 'ACL base lines',
             "<span style='color:#666;font-size:90%'>".$acl_html."</span>");
     }
-    print &ui_table_span("<b>$text{'acl_users'}</b><br>".$acl_select);
+    print &ui_table_span("<b>$text{'acl_users'}</b><br>".$acl_select.$jail_info_html);
     print &ui_table_span("<b>$text{'base_owner'}</b><br>".$owner_select);
     print &ui_table_span("<b>$text{'base_group'}</b><br>".$group_select);
     print &ui_table_end();

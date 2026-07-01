@@ -85,6 +85,40 @@ sub _sanitize_user_list
     return @users;
 }
 
+sub format_user_label
+{
+    my ($name, $uid) = @_;
+    my $n = (defined $name && $name ne '') ? $name : '-';
+    my $i = (defined $uid && $uid ne '') ? $uid : '-';
+    return $n.':'.$i;
+}
+
+sub format_group_label
+{
+    my ($name, $gid) = @_;
+    my $n = (defined $name && $name ne '') ? $name : '-';
+    my $i = (defined $gid && $gid ne '') ? $gid : '-';
+    return $n.':'.$i;
+}
+
+sub user_uid_for_name
+{
+    my ($name) = @_;
+    return undef if (!defined $name || $name eq '');
+    my @p = getpwnam($name);
+    return undef if (!@p);
+    return $p[2];
+}
+
+sub group_gid_for_name
+{
+    my ($name) = @_;
+    return undef if (!defined $name || $name eq '');
+    my @g = getgrnam($name);
+    return undef if (!@g);
+    return $g[2];
+}
+
 sub normalize_acl_user_token
 {
     my ($user) = @_;
