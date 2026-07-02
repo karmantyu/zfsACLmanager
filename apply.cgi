@@ -89,10 +89,17 @@ sub _build_run_context_html
     my $profile = $opt{profile} || 'MEDIA';
     my $base_owner = $opt{base_owner} || '';
     my $base_group = $opt{base_group} || '';
+    my $jail_uid = $opt{jail_uid} || '';
+    my $jail_gid = $opt{jail_gid} || '';
+    my $custom_mode_file = $opt{custom_mode_file} || '';
+    my $custom_mode_dir = $opt{custom_mode_dir} || '';
 
     my $info = detect_target_info($target);
-    my ($mode_dir, $mode_file) = profile_modes($profile);
-    my $run_modes = "dir=$mode_dir file=$mode_file";
+    my ($mode_dir, $mode_file) = profile_modes($profile, $custom_mode_file, $custom_mode_dir);
+    my $run_modes = "file=$mode_file dir=$mode_dir";
+    if ($custom_mode_file ne '' || $custom_mode_dir ne '') {
+        $run_modes .= " (custom)";
+    }
 
     my $disp_uid = $info->{posix_uid};
     my $disp_gid = $info->{posix_gid};
@@ -103,6 +110,10 @@ sub _build_run_context_html
     if ($base_group) {
         my $g = getgrnam($base_group);
         $disp_gid = $g if (defined $g);
+    }
+    if (($profile eq 'JAILMEDIA' || $profile eq 'JAILEXEC') && $jail_uid ne '' && $jail_gid ne '' && !$base_owner && !$base_group) {
+        $disp_uid = $jail_uid;
+        $disp_gid = $jail_gid;
     }
     my $posix_base = (defined $disp_uid && $disp_uid ne '' && defined $disp_gid && $disp_gid ne '') ?
         $disp_uid."/".$disp_gid : 'N/A';
@@ -125,6 +136,12 @@ sub _build_run_context_html
         $info->{mountpoint} ? &html_escape($info->{mountpoint}) : 'N/A');
     $html .= &ui_table_row($text{'profile'}, &html_escape($profile));
     $html .= &ui_table_row($text{'posix_modes'}, &html_escape($run_modes));
+    if ($jail_uid ne '') {
+        $html .= &ui_table_row($text{'jail_uid'}, &html_escape($jail_uid));
+    }
+    if ($jail_gid ne '') {
+        $html .= &ui_table_row($text{'jail_gid'}, &html_escape($jail_gid));
+    }
     $html .= &ui_table_row($text{'posix_base'}, $posix_cell);
     my $acl_lines = get_acl_base_lines($target);
     if ($acl_lines && @$acl_lines) {
@@ -240,6 +257,8 @@ my $mode = $in{'mode'} || '';
 
 my ($base_owner) = split(/\n/, $in{'base_owner'} || '');
 my ($base_group) = split(/\n/, $in{'base_group'} || '');
+my $jail_uid = $in{'jail_uid'} || '';
+my $jail_gid = $in{'jail_gid'} || '';
 
 my $run_profile = $in{'profile'} || $info->{profile} || 'MEDIA';
 my $run_dir = _run_dir();
@@ -272,6 +291,8 @@ if (defined $pid && $pid == 0) {
         profile    => $run_profile,
         base_owner => $base_owner || '',
         base_group => $base_group || '',
+        jail_uid   => $jail_uid || '',
+        jail_gid   => $jail_gid || '',
         rights     => ($in{'rights'} || ''),
         write      => ($in{'write'} || 0),
         delete     => ($in{'delete'} || 0),
@@ -299,6 +320,8 @@ if (!defined $pid) {
         profile    => $run_profile,
         base_owner => $base_owner || '',
         base_group => $base_group || '',
+        jail_uid   => $jail_uid || '',
+        jail_gid   => $jail_gid || '',
         rights     => ($in{'rights'} || ''),
         write      => ($in{'write'} || 0),
         delete     => ($in{'delete'} || 0),
@@ -316,7 +339,9 @@ if (!defined $pid) {
         mode       => $mode,
         profile    => $run_profile,
         base_owner => $base_owner || '',
-        base_group => $base_group || ''
+        base_group => $base_group || '',
+        jail_uid   => $jail_uid || '',
+        jail_gid   => $jail_gid || ''
     );
 }
 else {
@@ -330,6 +355,8 @@ else {
     my $js_profile = _js_escape($run_profile);
     my $js_owner = _js_escape($base_owner || '');
     my $js_group = _js_escape($base_group || '');
+    my $js_juid = _js_escape($jail_uid || '');
+    my $js_jgid = _js_escape($jail_gid || '');
     print "<script>\n".
           "var runJob = '"._js_escape($job_id)."';\n".
           "var runDone = false;\n".
@@ -340,6 +367,8 @@ else {
               "'&profile='+encodeURIComponent('".$js_profile."')+".
               "'&base_owner='+encodeURIComponent('".$js_owner."')+".
               "'&base_group='+encodeURIComponent('".$js_group."')+".
+              "'&jail_uid='+encodeURIComponent('".$js_juid."')+".
+              "'&jail_gid='+encodeURIComponent('".$js_jgid."')+".
               "'&keep_logs='+encodeURIComponent('".($keep_logs ? 1 : 0)."');\n".
           "function _lastLine(t){\n".
           "  if(!t) return '';\n".

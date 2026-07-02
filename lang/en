@@ -62,6 +62,6 @@ err_target=Missing target path
 err_dataset=Dataset not found for target
 save=Save
 back=Back
-module_version=1.1b beta
+module_version=1.1c beta
 extra_jail_uid=Extra user UID
 extra_jail_gid=Extra user GID
