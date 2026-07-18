@@ -5,7 +5,20 @@ require './zfsaclmanager-lib.pl';
 our (%in, %text);
 
 &ReadParse();
+my $target_dataset = $in{'target_dataset'} || '';
+my $target_path = $in{'target_path'} || '';
 my $target = $in{'target'} || '';
+$target_dataset =~ s/^\s+|\s+$//g;
+$target_path =~ s/^\s+|\s+$//g;
+$target =~ s/^\s+|\s+$//g;
+if ($target eq '') {
+    if ($target_path ne '') {
+        $target = $target_path;
+    }
+    elsif ($target_dataset ne '') {
+        $target = $target_dataset;
+    }
+}
 my $update_error = '';
 my $info;
 
@@ -106,10 +119,43 @@ if ($ver ne '') {
 }
 print "<div style='clear:both'></div>";
 
-print &ui_form_start('index.cgi', 'get');
+print &ui_form_start('index.cgi', 'get', undef, "onsubmit='return zfsacl_target_submit(this)' ");
 print &ui_table_start($text{'target_title'}, undef, 2);
-print &ui_table_row($text{'target'},
-    &ui_filebox('target', $target, 60, 0, undef, undef, 0));
+my @dataset_opts = ( [ '', '-- Select dataset mountpoint --' ] );
+my %seen_dataset;
+my $zfs_ds = _run_cmd("zfs list -H -o name,mountpoint -t filesystem");
+foreach my $line (split(/\n/, $zfs_ds || '')) {
+    next if ($line =~ /^\s*$/);
+    my ($ds, $mp) = split(/\s+/, $line, 2);
+    next if (!defined $ds || !defined $mp);
+    $ds =~ s/^\s+|\s+$//g;
+    $mp =~ s/^\s+|\s+$//g;
+    next if ($ds eq '' || $mp eq '' || $mp eq '-' || $mp eq 'none');
+    next if ($seen_dataset{$mp}++);
+    push @dataset_opts, [ $mp, $ds." (".$mp.")" ];
+}
+my $dataset_selected = $target_dataset ne '' ? $target_dataset : '';
+if ($dataset_selected eq '' && $target ne '') {
+    foreach my $opt (@dataset_opts) {
+        next if (!$opt || !ref($opt) || !$opt->[0]);
+        if ($opt->[0] eq $target) {
+            $dataset_selected = $target;
+            last;
+        }
+    }
+}
+my $manual_selected = $target_path ne '' ? $target_path : $target;
+if ($dataset_selected ne '' && $target_path eq '') {
+    $manual_selected = '';
+}
+print &ui_table_row($text{'target_dataset'} || 'Dataset / Filesystem',
+    &ui_select('target_dataset', $dataset_selected, \@dataset_opts, 1, 0, 0, 0,
+        "onchange='zfsacl_target_update(this.form, \"dataset\")'"));
+print &ui_table_row($text{'target_manual'} || 'Directory / File path (manual or browse)',
+    &ui_filebox('target_path', $manual_selected, 60, 0, undef,
+        "onchange='zfsacl_target_update(this.form, \"manual\")'"));
+print &ui_table_row($text{'target'}, "<span style='color:#666'>".
+    &html_escape($text{'target_hint'} || 'Manual path overrides dataset selection when both are set.')."</span>");
 print &ui_table_end();
 print &ui_form_end([ [ 'detect', $text{'detect'} ] ]);
 
@@ -185,6 +231,12 @@ if ($target ne '') {
     if ($acl_source) {
         ($acl_source, $jail_uid, $jail_gid, $custom_mode_file, $custom_mode_dir) = parse_acl_users_prop($acl_source);
         @acl_selected = _sanitize_user_list($acl_source);
+    }
+    if ($custom_mode_file eq '' && defined $info->{mode_file} && $info->{mode_file} ne '') {
+        $custom_mode_file = $info->{mode_file};
+    }
+    if ($custom_mode_dir eq '' && defined $info->{mode_dir} && $info->{mode_dir} ne '') {
+        $custom_mode_dir = $info->{mode_dir};
     }
     my %acl_seen = map { $_ => 1 } @acl_selected;
     my $smb_users = list_samba_users();
@@ -276,10 +328,14 @@ if ($target ne '') {
     print "<tr id='jail_gid_row' style='$jail_row_style'><td>".&html_escape($text{'jail_gid'})."</td><td>$jail_gid_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_jail_gid'})."</span></td></tr>";
     
     # Custom POSIX modes fields
+    my $file_ph = (defined $info->{mode_file} && $info->{mode_file} ne '') ? $info->{mode_file} : '644';
+    my $dir_ph  = (defined $info->{mode_dir}  && $info->{mode_dir}  ne '') ? $info->{mode_dir}  : '755';
+    my $dir_hint = $dir_ph eq '2775' ? '2775 (setgid dir)' : $dir_ph;
+    my $file_hint = $file_ph;
     my $custom_mode_file_input = &ui_textbox('custom_mode_file', $custom_mode_file, 6, 0, 3,
-        "onchange='zfsacl_update_modes()' placeholder='644' ");
+        "onchange='zfsacl_update_modes()' oninput='this.dataset.userEdited=\"1\"' placeholder='$file_hint' title='Current profile file mode' style='font-weight:600;color:#0b5fff;background:#f4f8ff;border-color:#8fb6ff' ");
     my $custom_mode_dir_input = &ui_textbox('custom_mode_dir', $custom_mode_dir, 6, 0, 3,
-        "onchange='zfsacl_update_modes()' placeholder='755' ");
+        "onchange='zfsacl_update_modes()' oninput='this.dataset.userEdited=\"1\"' placeholder='$dir_hint' title='Current profile directory mode' style='font-weight:600;color:#0b5fff;background:#f4f8ff;border-color:#8fb6ff' ");
     print "<tr id='custom_mode_file_row'><td>".&html_escape($text{'custom_mode_file'})."</td><td>$custom_mode_file_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_custom_modes'})."</span></td></tr>";
     print "<tr id='custom_mode_dir_row'><td>".&html_escape($text{'custom_mode_dir'})."</td><td>$custom_mode_dir_input <span style='color:#666;font-size:90%;margin-left:8px'>".&html_escape($text{'extra_custom_modes'})."</span></td></tr>";
     my $disp_uid = $info->{posix_uid};
@@ -343,6 +399,10 @@ if ($target ne '') {
             "  else if (v === 'JAILEXEC') { txt = 'file=775 dir=2775'; }\n".
             "  var cmf = document.getElementById('custom_mode_file');\n".
             "  var cmd = document.getElementById('custom_mode_dir');\n".
+            "  var defs = { 'MEDIA': { file: '644', dir: '775' }, 'EXEC': { file: '755', dir: '775' }, 'JAILMEDIA': { file: '664', dir: '2775' }, 'JAILEXEC': { file: '775', dir: '2775' } };\n".
+            "  var def = defs[v] || defs['MEDIA'];\n".
+            "  if (cmf && cmf.value === '' && cmf.dataset.userEdited !== '1') { cmf.value = def.file; }\n".
+            "  if (cmd && cmd.value === '' && cmd.dataset.userEdited !== '1') { cmd.value = def.dir; }\n".
             "  if (cmf && cmf.value !== '') { txt = 'file='+cmf.value+' dir='+(cmd && cmd.value ? cmd.value : txt.split(' dir=')[1]); }\n".
             "  else if (cmd && cmd.value !== '') { txt = 'file='+txt.split(' file=')[1].split(' ')[0]+' dir='+cmd.value; }\n".
             "  var span = document.getElementById('posix_modes_val');\n".
@@ -360,6 +420,43 @@ if ($target ne '') {
             "    profile_update_props(f, v);\n".
             "  }\n".
             "}\n".
+          "function zfsacl_target_update(f, source){\n".
+          "  if(!f) return;\n".
+          "  var ds = f.elements['target_dataset'];\n".
+          "  var mp = f.elements['target_path'];\n".
+          "  if(source === 'dataset'){\n".
+          "    if(mp){ mp.value = ''; }\n".
+          "  }\n".
+          "  else if(source === 'manual'){\n".
+          "    if(ds){ ds.selectedIndex = 0; }\n".
+          "  }\n".
+          "  var tgt = f.elements['target'];\n".
+          "  if(!tgt){\n".
+          "    tgt = document.createElement('input');\n".
+          "    tgt.type = 'hidden';\n".
+          "    tgt.name = 'target';\n".
+          "    tgt.id = 'target';\n".
+          "    f.appendChild(tgt);\n".
+          "  }\n".
+          "  if(mp && mp.value !== ''){\n".
+          "    tgt.value = mp.value;\n".
+          "  }\n".
+          "  else if(ds && ds.value !== ''){\n".
+          "    tgt.value = ds.value;\n".
+          "  }\n".
+          "  else {\n".
+          "    tgt.value = '';\n".
+          "  }\n".
+          "}\n".
+          "function zfsacl_target_submit(f){\n".
+          "  if(!f) return true;\n".
+          "  var ds = f.elements['target_dataset'];\n".
+          "  var mp = f.elements['target_path'];\n".
+          "  if(mp && mp.value !== '' && ds){\n".
+          "    ds.selectedIndex = 0;\n".
+          "  }\n".
+          "  return true;\n".
+          "}\n".
           "function profile_update_props(f, v){\n".
           "  if(!f) return;\n".
           "  var params = [];\n".
@@ -637,12 +734,14 @@ if ($target ne '') {
     print &ui_hidden('target', $info->{target});
     my $effective_profile = $profile_sel;
     my $users_val = join(' ', @acl_selected);
+    my $cross_default = defined $in{'cross_mounts'} ? $in{'cross_mounts'} : 0;
     print &ui_hidden('users', $users_val);
     print &ui_hidden('profile', $effective_profile);
     print &ui_hidden('base_owner', join("\n", @base_owner_sel));
     print &ui_hidden('base_group', join("\n", @base_group_sel));
     print &ui_hidden('jail_uid', $jail_uid);
     print &ui_hidden('jail_gid', $jail_gid);
+    print &ui_hidden('cross_mounts', $cross_default);
     print &ui_table_start($text{'menu'}, undef, 2);
     print &ui_table_row($text{'mode'},
         &ui_select('mode', $in{'mode'} || 'audit_posix', \@mode_opts, 1, 0, 0, 0,
@@ -650,6 +749,8 @@ if ($target ne '') {
     my $rec_default = defined $in{'recursive'} ? $in{'recursive'} : 1;
     print &ui_table_row($text{'recursive'},
         &ui_yesno_radio('recursive', $rec_default));
+    print &ui_table_row($text{'cross_mounts'},
+        &ui_yesno_radio('cross_mounts', $cross_default));
     my $snap_default = defined $in{'snapshot'} ? $in{'snapshot'} : 0;
     my $snap_disabled = ($info->{type} eq 'FILESYSTEM' && $info->{dataset}) ? 0 : 1;
     print &ui_table_row($text{'snapshot'},

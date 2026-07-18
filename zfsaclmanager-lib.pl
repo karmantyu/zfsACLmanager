@@ -27,6 +27,7 @@ our %ZFS_PROP_RECOMMENDED = (
     atime      => { off => 1 },
 );
 our ($MODE_DIR, $MODE_FILE);
+our $CROSS_MOUNTS = 0;
 
 sub state_get
 {
@@ -1417,7 +1418,8 @@ sub process_acl_block
 sub process_recursive_buffered
 {
     my ($mode, $users, $root) = @_;
-    my $cmd = "find "._quote_shell($root)." -xdev \\( -type d -o -type f \\) -print0 2>/dev/null | ".
+    my $xdev_flag = $CROSS_MOUNTS ? "" : "-xdev ";
+    my $cmd = "find "._quote_shell($root)." ".$xdev_flag."\\( -type d -o -type f \\) -print0 2>/dev/null | ".
               "xargs -0 getfacl 2>/dev/null";
     open my $fh, "-|", "sh", "-c", $cmd or return 1;
     my ($cur, $acl) = ("", "");
@@ -1583,6 +1585,7 @@ sub run_acl_manager
 
     $TARGET = $opt{target} || "";
     $DRY_RUN = $opt{dry_run} ? 1 : 0;
+    $CROSS_MOUNTS = $opt{cross_mounts} ? 1 : 0;
 
     my $info = detect_target_info($TARGET);
     $TYPE = $info->{type} || "OTHER";

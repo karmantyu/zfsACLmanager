@@ -286,6 +286,7 @@ if (defined $pid && $pid == 0) {
         mode       => $mode,
         users      => ($in{'users'} || ''),
         recursive  => $in{'recursive'} ? 1 : 0,
+        cross_mounts => $in{'cross_mounts'} ? 1 : 0,
         dry_run    => $in{'dryrun'} ? 1 : 0,
         snapshot   => $in{'snapshot'} ? 1 : 0,
         profile    => $run_profile,
@@ -315,6 +316,7 @@ if (!defined $pid) {
         mode       => $mode,
         users      => ($in{'users'} || ''),
         recursive  => $in{'recursive'} ? 1 : 0,
+        cross_mounts => $in{'cross_mounts'} ? 1 : 0,
         dry_run    => $in{'dryrun'} ? 1 : 0,
         snapshot   => $in{'snapshot'} ? 1 : 0,
         profile    => $run_profile,
@@ -357,6 +359,7 @@ else {
     my $js_group = _js_escape($base_group || '');
     my $js_juid = _js_escape($jail_uid || '');
     my $js_jgid = _js_escape($jail_gid || '');
+    my $js_cross = _js_escape($in{'cross_mounts'} ? 1 : 0);
     print "<script>\n".
           "var runJob = '"._js_escape($job_id)."';\n".
           "var runDone = false;\n".
@@ -369,6 +372,7 @@ else {
               "'&base_group='+encodeURIComponent('".$js_group."')+".
               "'&jail_uid='+encodeURIComponent('".$js_juid."')+".
               "'&jail_gid='+encodeURIComponent('".$js_jgid."')+".
+              "'&cross_mounts='+encodeURIComponent('".$js_cross."')+".
               "'&keep_logs='+encodeURIComponent('".($keep_logs ? 1 : 0)."');\n".
           "function _lastLine(t){\n".
           "  if(!t) return '';\n".
